@@ -9,12 +9,12 @@ import torch.nn as nn
 
 from functools import partial
 
-from ...MobileSAMv2.mobilesamv2.modeling import ImageEncoderViT, MaskDecoder, PromptEncoder, Sam, TwoWayTransformer
+from models.MobileSAMv2.mobilesamv2.modeling import ImageEncoderViT, MaskDecoder, PromptEncoder, Sam, TwoWayTransformer
 # from models.MobileSAMv2.tinyvit.tiny_vit import TinyViT
-from ...MobileSAMv2.tinyvit.tiny_vit_change import TinyViT
-from ...MobileSAMv2.efficientvit.models.efficientvit.backbone import EfficientViTLargeBackbone
-from ...MobileSAMv2.efficientvit.models.efficientvit.sam import SamNeck, EfficientViTSamImageEncoder
-from ...MobileSAMv2.efficientvit.models.nn.norm import set_norm_eps
+from models.MobileSAMv2.tinyvit.tiny_vit_change import TinyViT
+from models.MobileSAMv2.efficientvit.models.efficientvit.backbone import EfficientViTLargeBackbone
+from models.MobileSAMv2.efficientvit.models.efficientvit.sam import SamNeck, EfficientViTSamImageEncoder
+from models.MobileSAMv2.efficientvit.models.nn.norm import set_norm_eps
 
 def build_sam_vit_h(checkpoint=None):
     return _build_sam(
@@ -97,47 +97,23 @@ def _build_sam(
             state_dict = torch.load(f)
         sam.load_state_dict(state_dict,strict=False)
     return sam
-# def build_sam_vit_t_encoder(checkpoint=None,img_size=1024):
-#     mobile_sam =TinyViT(img_size=1024, in_chans=3, num_classes=2,
-#                 embed_dims=[64, 128, 160, 320],
-#                 depths=[2, 2, 6, 2],
-#                 num_heads=[2, 4, 5, 10],
-#                 window_sizes=[7, 7, 14, 7],
-#                 mlp_ratio=4.,
-#                 drop_rate=0.,
-#                 drop_path_rate=0.0,
-#                 use_checkpoint=False,
-#                 mbconv_expand_ratio=4.0,
-#                 local_conv_size=3,
-#                 layer_lr_decay=0.8)
-#     if checkpoint is not None:
-#         with open(checkpoint, "rb") as f:
-#             state_dict = torch.load(f)
-#         mobile_sam.load_state_dict(state_dict['model'],strict=False)
-#     return mobile_sam
-
-def build_sam_vit_t_encoder(checkpoint=None, img_size=1024):
-    mobile_sam = TinyViT(
-        img_size=img_size, in_chans=3, num_classes=2,
-        embed_dims=[64, 128, 160, 320],
-        depths=[2, 2, 6, 2],
-        num_heads=[2, 4, 5, 10],
-        window_sizes=[7, 7, 14, 7],
-        mlp_ratio=4.,
-        drop_rate=0.,
-        drop_path_rate=0.0,
-        use_checkpoint=False,
-        mbconv_expand_ratio=4.0,
-        local_conv_size=3,
-        layer_lr_decay=0.8
-    )
+def build_sam_vit_t_encoder(checkpoint=None):
+    mobile_sam =TinyViT(img_size=1024, in_chans=3, num_classes=2,
+                embed_dims=[64, 128, 160, 320],
+                depths=[2, 2, 6, 2],
+                num_heads=[2, 4, 5, 10],
+                window_sizes=[7, 7, 14, 7],
+                mlp_ratio=4.,
+                drop_rate=0.,
+                drop_path_rate=0.0,
+                use_checkpoint=False,
+                mbconv_expand_ratio=4.0,
+                local_conv_size=3,
+                layer_lr_decay=0.8)
     if checkpoint is not None:
         with open(checkpoint, "rb") as f:
             state_dict = torch.load(f)
-        if isinstance(state_dict, dict) and "model" in state_dict:
-            mobile_sam.load_state_dict(state_dict["model"], strict=False)
-        else:
-            mobile_sam.load_state_dict(state_dict, strict=False)
+        mobile_sam.load_state_dict(state_dict['model'],strict=False)
     return mobile_sam
 
 def build_efficientvit_l2_encoder(checkpoint=None):

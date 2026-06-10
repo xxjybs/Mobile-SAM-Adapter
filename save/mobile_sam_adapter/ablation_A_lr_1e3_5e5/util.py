@@ -543,15 +543,6 @@ def train_one_epoch(
             target = target.unsqueeze(1).cuda()
             onehot = onehot.cuda()
 
-        model_inp_size = getattr(model, "inp_size", None)
-        if (
-                isinstance(model_inp_size, int)
-                and (input.size(2) != model_inp_size or input.size(3) != model_inp_size)
-        ):
-            input = F.interpolate(input, size=model_inp_size, mode='bilinear', align_corners=False)
-            target = F.interpolate(target.float(), size=model_inp_size, mode='nearest')
-            onehot = F.interpolate(onehot.float(), size=model_inp_size, mode='nearest')
-
         logit = model(input)
         # logit, boundary = model(input)
 

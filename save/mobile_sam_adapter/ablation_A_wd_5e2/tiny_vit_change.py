@@ -16,7 +16,7 @@ from timm.models.layers import DropPath as TimmDropPath,\
     to_2tuple, trunc_normal_
 from timm.models.registry import register_model
 from typing import Tuple
-from ...mobilenetv3 import  MobileBottleneck
+from models.mobilenetv3 import  MobileBottleneck
 
 class Conv2d_BN(torch.nn.Sequential):
     def __init__(self, a, b, ks=1, stride=1, pad=0, dilation=1,
@@ -463,7 +463,7 @@ class LayerNorm2d(nn.Module):
         x = (x - u) / torch.sqrt(s + self.eps)
         x = self.weight[:, None, None] * x + self.bias[:, None, None]
         return x
-from ...AGFF import AGFF
+from models.AGFF import AGFF
 class mobilenetv3_block(nn.Module):
     def __init__(self, inp, oup, stride, exp=0.5):
         super(mobilenetv3_block, self).__init__()
@@ -479,7 +479,7 @@ class mobilenetv3_block(nn.Module):
         return out
 
 
-from ...adapter import PromptGenerator
+from models.adapter import PromptGenerator
 class TinyViT(nn.Module):
     def __init__(self, img_size=224, in_chans=3, num_classes=1000,
                  embed_dims=[96, 192, 384, 768], depths=[2, 2, 6, 2],
@@ -497,10 +497,7 @@ class TinyViT(nn.Module):
         self.img_size=img_size
         #import pdb;pdb.set_trace()
         self.num_classes = num_classes
-        patch_size=4
-        base_size=img_size//patch_size
-        # self.feature_size = [256, 128, 64, 64]
-        self.feature_size = [base_size,base_size//2,base_size//4,base_size//4]
+        self.feature_size = [256, 128, 64, 64]
         self.depths = depths
         self.num_layers = len(depths)
         self.mlp_ratio = mlp_ratio
@@ -628,25 +625,15 @@ class TinyViT(nn.Module):
         for i in range(start_i, len(self.layers)):
             layer = self.layers[i]
             B, _, C = x.size()
-            #x_reshape = x.view(B, self.feature_size[i], self.feature_size[i], C)
-            side = int((x.size(1)) ** 0.5)
-            if side * side != x.size(1):
-                raise RuntimeError(
-                    f"Token length {x.size(1)} is not a perfect square; cannot reshape to 2D grid."
-                )
-            x_reshape = x.view(B, side, side, C)
+            x_reshape = x.view(B, self.feature_size[i], self.feature_size[i], C)
             branch_out = self.branch_mobile_v3[i](x_reshape.permute(0, 3, 1, 2), branch_out)
-            #branch_out_reshape = branch_out.permute(0, 2, 3, 1).view(B, self.feature_size[i]*self.feature_size[i], C//self.scale_factor)
-            branch_out_reshape = branch_out.permute(0, 2, 3, 1).view(B, side * side, C // self.scale_factor)
+            branch_out_reshape = branch_out.permute(0, 2, 3, 1).view(B, self.feature_size[i]*self.feature_size[i], C//self.scale_factor)
             branch_out_reshape = prohandcrafteds[i] + branch_out_reshape
             prompt = self.prompt_generator.init_prompt(x_reshape, branch_out_reshape, i+1)
             # branch_out = branch_out_reshape.view(B, self.feature_size[i], self.feature_size[i], C//self.scale_factor).permute(0, 3, 1, 2)
-            #x = layer(x, self.feature_size[i], self.prompt_generator, prompt, block_num=i+1)
-            x = layer(x, side, self.prompt_generator, prompt, block_num=i + 1)
+            x = layer(x, self.feature_size[i], self.prompt_generator, prompt, block_num=i+1)
         B,_,C=x.size()
-       # x = x.view(B, 64, 64, C)
-        final_size = self.img_size//16
-        x = x.view(B, final_size, final_size, C)
+        x = x.view(B, 64, 64, C)
         x=x.permute(0, 3, 1, 2)
         x=self.neck(x)
         return x

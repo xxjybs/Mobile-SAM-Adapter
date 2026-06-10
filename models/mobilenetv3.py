@@ -107,7 +107,7 @@ class MobileBottleneck(nn.Module):
             conv_layer(exp, oup, 1, 1, 0, bias=False),
             norm_layer(oup),
             nn.Dropout2d(0.1),
-        ).cuda()
+        )
 
     def forward(self, x):
         if self.use_res_connect:

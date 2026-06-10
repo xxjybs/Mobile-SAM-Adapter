@@ -11,10 +11,12 @@ from .ShuffleNetv2 import ShuffleV2
 from .sam2_adapter_tiny import SAM2_Adapter_T
 from .segformer import *
 from .mobile_sam_adapter import Mobile_sam_adapter
+from .sam_adapter.loader import sam_adapter_loader
 # from .mobile_sam_adapter_change import Mobile_sam_adapter
 
 model_dict = {
     # 'PVMNet': PVMNet,
+    'sam_adapter': sam_adapter_loader,
     'sam2_adapter_tiny': SAM2_Adapter_T,
     'SegFormerB0': make_SegFormerB0,
     'SegFormerB1': make_SegFormerB1,

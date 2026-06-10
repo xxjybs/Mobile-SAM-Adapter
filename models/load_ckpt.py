@@ -42,7 +42,7 @@ def load_checkpoint(model, checkpoint_pth: str, device, model_name=None):
                 print(f"⚠️[UNUSED] {k} {tuple(state_dict[k].shape)}")
 
 
-    if model_name == "sam2_adapter_tiny" or model_name == "mobile_sam_adapter":
+    if model_name == "sam2_adapter_tiny" or model_name == "mobile_sam_adapter" or model_name == "sam_adapter":
         for name, para in model.named_parameters():
             if "image_encoder" in name and "prompt_generator" not in name:
                 para.requires_grad_(False)

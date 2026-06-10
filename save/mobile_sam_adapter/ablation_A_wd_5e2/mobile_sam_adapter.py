@@ -6,11 +6,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .models import register
-from .mmseg.models.sam import ImageEncoderViT, MaskDecoder, TwoWayTransformer
+from models.sam_adapter.modeling.models import register
+
+from models.MobileSAMv2.mobilesamv2.build_sam import *
+# from models.sam_adapter.modeling.mmseg.models.sam import ImageEncoderViT, MaskDecoder, TwoWayTransformer
+from models.cross_attention import EdgePromptBranch
+
 
 logger = logging.getLogger(__name__)
-from .iou_loss import IOU
+from models.sam_adapter.modeling.iou_loss import IOU
 from typing import Any, Optional, Tuple
 
 
@@ -26,32 +30,6 @@ def init_weights(layer):
         nn.init.normal_(layer.weight, mean=1.0, std=0.02)
         nn.init.constant_(layer.bias, 0.0)
 
-class BBCEWithLogitLoss(nn.Module):
-    '''
-    Balanced BCEWithLogitLoss
-    '''
-    def __init__(self):
-        super(BBCEWithLogitLoss, self).__init__()
-
-    def forward(self, pred, gt):
-        eps = 1e-10
-        count_pos = torch.sum(gt) + eps
-        count_neg = torch.sum(1. - gt)
-        ratio = count_neg / count_pos
-        w_neg = count_pos / (count_pos + count_neg)
-
-        bce1 = nn.BCEWithLogitsLoss(pos_weight=ratio)
-        loss = w_neg * bce1(pred, gt)
-
-        return loss
-
-def _iou_loss(pred, target):
-    pred = torch.sigmoid(pred)
-    inter = (pred * target).sum(dim=(2, 3))
-    union = (pred + target).sum(dim=(2, 3)) - inter
-    iou = 1 - (inter / union)
-
-    return iou.mean()
 
 class PositionEmbeddingRandom(nn.Module):
     """
@@ -90,30 +68,13 @@ class PositionEmbeddingRandom(nn.Module):
         return pe.permute(2, 0, 1)  # C x H x W
 
 
-@register('sam')
-class SAM(nn.Module):
-    def __init__(self, inp_size=None, encoder_mode=None, loss=None):
+class Mobile_sam_adapter(nn.Module):
+    def __init__(self, inp_size=1024):
         super().__init__()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.embed_dim = encoder_mode['embed_dim']
-        self.image_encoder = ImageEncoderViT(
-            img_size=inp_size,
-            patch_size=encoder_mode['patch_size'],
-            in_chans=3,
-            embed_dim=encoder_mode['embed_dim'],
-            depth=encoder_mode['depth'],
-            num_heads=encoder_mode['num_heads'],
-            mlp_ratio=encoder_mode['mlp_ratio'],
-            out_chans=encoder_mode['out_chans'],
-            qkv_bias=encoder_mode['qkv_bias'],
-            norm_layer=partial(torch.nn.LayerNorm, eps=1e-6),
-            act_layer=nn.GELU,
-            use_rel_pos=encoder_mode['use_rel_pos'],
-            rel_pos_zero_init=True,
-            window_size=encoder_mode['window_size'],
-            global_attn_indexes=encoder_mode['global_attn_indexes'],
-        )
-        self.prompt_embed_dim = encoder_mode['prompt_embed_dim']
+        self.embed_dim = 1024
+        self.image_encoder = build_sam_vit_t_encoder()
+        self.prompt_embed_dim = 256
         self.mask_decoder = MaskDecoder(
             num_multimask_outputs=3,
             transformer=TwoWayTransformer(
@@ -127,28 +88,10 @@ class SAM(nn.Module):
             iou_head_hidden_dim=256,
         )
 
-        if 'evp' in encoder_mode['name']:
-            for k, p in self.encoder.named_parameters():
-                if "prompt" not in k and "mask_decoder" not in k and "prompt_encoder" not in k:
-                    p.requires_grad = False
-
-
-
-        self.loss_mode = loss
-        if self.loss_mode == 'bce':
-            self.criterionBCE = torch.nn.BCEWithLogitsLoss()
-
-        elif self.loss_mode == 'bbce':
-            self.criterionBCE = BBCEWithLogitLoss()
-
-        elif self.loss_mode == 'iou':
-            self.criterionBCE = torch.nn.BCEWithLogitsLoss()
-            self.criterionIOU = IOU()
-
-        self.pe_layer = PositionEmbeddingRandom(encoder_mode['prompt_embed_dim'] // 2)
+        self.pe_layer = PositionEmbeddingRandom(256 // 2)
         self.inp_size = inp_size
-        self.image_embedding_size = inp_size // encoder_mode['patch_size']
-        self.no_mask_embed = nn.Embedding(1, encoder_mode['prompt_embed_dim'])
+        self.image_embedding_size = inp_size // 16
+        self.no_mask_embed = nn.Embedding(1, 256)
 
     def set_input(self, input, gt_mask):
         self.input = input.to(self.device)
@@ -177,14 +120,13 @@ class SAM(nn.Module):
         )
 
         self.features = self.image_encoder(self.input)
-
         # Predict masks
         low_res_masks, iou_predictions = self.mask_decoder(
             image_embeddings=self.features,
             image_pe=self.get_dense_pe(),
             sparse_prompt_embeddings=sparse_embeddings,
             dense_prompt_embeddings=dense_embeddings,
-            multimask_output=False,
+            multimask_output=True,
         )
         # Upscale the masks to the original image resolution
         masks = self.postprocess_masks(low_res_masks, self.inp_size, self.inp_size)
@@ -246,20 +188,6 @@ class SAM(nn.Module):
         masks = masks[..., : input_size, : input_size]
         masks = F.interpolate(masks, original_size, mode="bilinear", align_corners=False)
         return masks
-
-    def backward_G(self):
-        """Calculate GAN and L1 loss for the generator"""
-        self.loss_G = self.criterionBCE(self.pred_mask, self.gt_mask)
-        if self.loss_mode == 'iou':
-            self.loss_G += _iou_loss(self.pred_mask, self.gt_mask)
-
-        self.loss_G.backward()
-
-    def optimize_parameters(self):
-        self.forward()
-        self.optimizer.zero_grad()  # set G's gradients to zero
-        self.backward_G()  # calculate graidents for G
-        self.optimizer.step()  # udpate G's weights
 
     def set_requires_grad(self, nets, requires_grad=False):
         """Set requies_grad=Fasle for all the networks to avoid unnecessary computations

@@ -153,7 +153,7 @@ class SAM2_Adapter_T(nn.Module):
             assert self.pred_obj_scores
             assert self.use_obj_ptrs_in_encoder
         self.mask_decoder = MaskDecoder(
-            num_multimask_outputs=2,
+            num_multimask_outputs=1,
             transformer=TwoWayTransformer(
                 depth=2,
                 embedding_dim=256,

@@ -4,6 +4,7 @@ DataLoader outputs 1024; Student runs at 512; Teacher runs at 1024 then downsamp
 """
 
 import os
+import inspect
 import time
 import torch
 import numpy as np
@@ -13,24 +14,41 @@ import torch.nn.functional as F
 import gc
 from models import model_dict
 from models.load_ckpt import load_checkpoint
-# from dataset.OrangeDefectDataloader1 import OrangeDefectLoader
-from dataset.PVM_dataset import NPY_datasets
+from dataset.OrangeDefectDataloader1 import OrangeDefectLoader
 from helper.util import AverageMeter, pred, Distill_one_epoch, train_one_epoch
 from helper.loss import IOU
+from helper.util import build_target_for_loss,build_logit_for_loss
 import random
 import shutil
+
+
+def _get_env(name, default, cast_fn):
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    try:
+        return cast_fn(value)
+    except ValueError as exc:
+        raise ValueError(f"Invalid value for env `{name}`: {value}") from exc
+
+
+def _extract_logits(output):
+    if isinstance(output, (list, tuple)):
+        return output[0]
+    return output
+
 
 def build_phase1_optim_sched(model):
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=1e-3,
+        lr=phase1_lr,
         betas=(0.9, 0.999),
         eps=1e-8,
-        weight_decay=1e-2,
+        weight_decay=weight_decay,
         amsgrad=False
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=phase1_epochs, eta_min=1e-5, last_epoch=-1
+        optimizer, T_max=phase1_epochs, eta_min=phase1_eta_min, last_epoch=-1
     )
     return optimizer, scheduler
 
@@ -38,51 +56,41 @@ def build_phase1_optim_sched(model):
 def build_phase2_optim_sched(model):
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=1e-4,
+        lr=phase2_lr,
         betas=(0.9, 0.999),
         eps=1e-8,
-        weight_decay=1e-2,
+        weight_decay=weight_decay,
         amsgrad=False
     )
-    # 按你的要求使用 CosineAnnealingLR(T_max=50)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=50, eta_min=1e-6, last_epoch=-1
+        optimizer, T_max=phase2_tmax, eta_min=phase2_eta_min, last_epoch=-1
     )
     return optimizer, scheduler
+
 
 def set_seed(seed: int = 42, deterministic: bool = True):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    # cudnn settings
+
     cudnn.benchmark = False
     if deterministic:
         torch.backends.cudnn.deterministic = True
     else:
         torch.backends.cudnn.deterministic = False
 
-# def worker_init_fn():
-#     seed = 42
-#     np.random.seed(seed)
-#     random.seed(seed)
 
 def worker_init_fn(worker_id):
     """
     DataLoader worker init to make worker RNGs deterministic and different across workers.
-
-    Called in each worker process with that worker's id (0..num_workers-1).
     """
-    # torch.initial_seed() returns a different base seed for each worker/process.
-    base_seed = torch.initial_seed()  # 64-bit value
-    # make it fit into 32-bit numpy/python seeds and mix with worker_id to avoid collisions
+    base_seed = torch.initial_seed()
     seed = (base_seed + worker_id) % (2**32 - 1)
     np.random.seed(seed)
     random.seed(seed)
-    # If you use libraries that require their own seeds, set them here (e.g., for pillow/augmentations)
     try:
-        import torchvision
-        # torchvision transforms that rely on random will follow python/np seeds
+        import torchvision  # noqa: F401
     except Exception:
         pass
 
@@ -95,41 +103,71 @@ def cleanup():
         pass
 
 
-inp_size = 1024
-model_name = 'mobile_sam_adapter'
-'''
-[
-'PVMNet': PVMNet,
-'PVMNetPlus': PVMNet_plus,
-'sam2_adapter_tiny': './checkpoints/sam2.1_hiera_tiny.pt',
-'SegFormerB0': make_SegFormerB0,
-'SegFormerB1': make_SegFormerB1,
-'sam2_adapter_light': SAM2_Adapter_Light,
-'unet': UNet,
-'mobile_sam_adapter': './checkpoints/mobile_sam.pt',
-]
-'''
-ckpt_path = './checkpoints/mobile_sam.pt'
+# =========================
+# Env-configurable configs
+# =========================
+inp_size = _get_env("INP_SIZE", 1024, int)
+model_name = os.getenv("MODEL_NAME", "mobile_sam_adapter")
+ckpt_path = os.getenv("CKPT_PATH", "./checkpoints/mobile_sam.pt")
 
-# train set
-batch_size = 4
-num_workers = 8
-epochs_total = 500
-phase1_epochs = 200                # 你的两阶段优化器/调度器切换点
+batch_size = _get_env("BATCH_SIZE", 4, int)
+num_workers = _get_env("NUM_WORKERS", 8, int)
+epochs_total = _get_env("EPOCHS_TOTAL", 500, int)
+phase1_epochs = _get_env("PHASE1_EPOCHS", 200, int)
 phase2_epochs = epochs_total - phase1_epochs
-test_freq = 30
+test_freq = _get_env("TEST_FREQ", 30, int)
 
-# data set
+phase1_lr = _get_env("PHASE1_LR", 1e-3, float)
+phase2_lr = _get_env("PHASE2_LR", 1e-4, float)
+weight_decay = _get_env("WEIGHT_DECAY", 1e-2, float)
+phase1_eta_min = _get_env("PHASE1_ETA_MIN", 1e-5, float)
+phase2_eta_min = _get_env("PHASE2_ETA_MIN", 1e-6, float)
+phase2_tmax = _get_env("PHASE2_TMAX", 50, int)
+
 img_size = inp_size
 is_onehot = False
-dataset_path = '../data/VOC2007/'
-gt_folder = '../data/VOC2007/test/masks/'
-test_list_file = "../data/VOC2007/test/image_names.txt"
+
+# 按你现在的数据结构默认到 data/orange
+dataset_path = os.getenv("DATASET_PATH", "./data/orange")
+gt_folder = os.getenv("GT_FOLDER", "./data/orange/masks/")
+test_list_file = os.getenv("TEST_LIST_FILE", "./data/orange/imageset/test.txt")
+exp_name = os.getenv("EXP_NAME", "phaseA_ablation")
+
 
 def main():
     set_seed(seed=42, deterministic=True)
     cleanup()
-    model = model_dict[model_name]()
+
+    # 优先给支持 inp_size 的模型传参，避免尺寸不匹配
+    # try:
+    #     model = model_dict[model_name](inp_size=inp_size)
+    # except TypeError:
+    #     model = model_dict[model_name]()
+    # 1) 一定要是 int，不要字符串
+    inp_size = int(os.getenv("INP_SIZE", 1024))
+
+    model_cls = model_dict[model_name]
+    sig = inspect.signature(model_cls.__init__)
+
+    if "inp_size" in sig.parameters:
+        model = model_cls(inp_size=inp_size)
+        print(f"[Init] {model_name} with inp_size={inp_size}")
+    else:
+        raise RuntimeError(
+            f"{model_name}.__init__ does not accept inp_size, "
+            f"but ablation is changing INP_SIZE={inp_size}. "
+            f"Please patch model constructor first."
+        )
+
+    # 2) 强校验：防止默默还是1024
+    if hasattr(model, "inp_size"):
+        assert int(model.inp_size) == int(inp_size), \
+            f"model.inp_size={model.inp_size} != INP_SIZE={inp_size}"
+
+    print("model.inp_size:", model.inp_size)
+    print("encoder.img_size:", model.image_encoder.img_size)
+    print("encoder.feature_size:", model.image_encoder.feature_size)
+
     criterion_bce = torch.nn.BCEWithLogitsLoss()
     criterion_iou = IOU(is_onehot)
 
@@ -148,35 +186,36 @@ def main():
     if ckpt_path is not None:
         load_checkpoint(model, ckpt_path, device, model_name)
 
-    exp_name = 'adapter_with_AGFF_orange1.5k'
     save_path = './save/{}/{}/'.format(model_name, exp_name)
     os.makedirs(save_path, exist_ok=True)
     pred_path = './save/{}/{}/pred/'.format(model_name, exp_name)
     os.makedirs(pred_path, exist_ok=True)
-    path = './models/MobileSAMv2/mobilesamv2/build_sam.py'
+
     copy_files = [
         './models/mobile_sam_adapter.py',
         './models/MobileSAMv2/mobilesamv2/build_sam.py',
-        # './models/mobile_sam_adapter_change.py',
-        # './models/MobileSAMv2/tinyvit/tiny_vit.py',
         './models/MobileSAMv2/tinyvit/tiny_vit_change.py',
         './models/MobileSAMv2/mobilesamv2/modeling/mask_decoder.py',
         './helper/util.py',
         './train.py'
     ]
     for file in copy_files:
-        name = file.split('/')[-1]
-        save_file = os.path.join(save_path, name)
-        shutil.copy2(file, save_file)
-    trainset = NPY_datasets(path_Data=dataset_path, num_classes=3, train=True, test=False)
-    traindataloader = DataLoader(trainset, batch_size=batch_size, shuffle=True,
-                                 num_workers=num_workers, worker_init_fn=worker_init_fn, pin_memory=True)
-    testset = NPY_datasets(path_Data=dataset_path, num_classes=3, train=False, test=True)
-    testdataloader = DataLoader(testset, batch_size=1, shuffle=False,
-                                num_workers=num_workers, worker_init_fn=worker_init_fn, pin_memory=True)
-    valset = NPY_datasets(path_Data=dataset_path, num_classes=3, train=False, test=False)
-    valdataloader = DataLoader(valset, batch_size=1, shuffle=False,
-                                num_workers=num_workers, worker_init_fn=worker_init_fn, pin_memory=True)
+        if os.path.exists(file):
+            name = file.split('/')[-1]
+            save_file = os.path.join(save_path, name)
+            shutil.copy2(file, save_file)
+
+    trainset = OrangeDefectLoader(dataset_path, train=True, test=False, size=img_size, num_classes=2)
+    traindataloader = DataLoader(
+        trainset, batch_size=batch_size, shuffle=True,
+        num_workers=num_workers, worker_init_fn=worker_init_fn, pin_memory=True
+    )
+
+    testset = OrangeDefectLoader(dataset_path, train=False, test=True, size=img_size, num_classes=2)
+    testdataloader = DataLoader(
+        testset, batch_size=1, shuffle=False,
+        num_workers=num_workers, worker_init_fn=worker_init_fn, pin_memory=True
+    )
 
     with open(test_list_file, "r") as f:
         val_img_list = [line.strip() for line in f.readlines()]
@@ -188,9 +227,10 @@ def main():
     log_line = "===================  validation of model  ===================\n"
     print(log_line.strip())
     log_file.write(log_line)
-    iou = pred_train(testdataloader, model, val_img_list, pred_path, gt_folder, inp_size, is_onehot)
+    iou = pred(testdataloader, model, val_img_list, pred_path, gt_folder, inp_size, is_onehot)
     log_line = '✅ Background IoU: {:.4f}\n✅ Foreground IoU: {:.4f}\n✅ Mean IoU (mIoU): {:.4f}\n'.format(
-        iou[0], iou[1], iou[2])
+        iou[0], iou[1], iou[2]
+    )
     print(log_line.strip())
     log_file.write(log_line)
 
@@ -198,13 +238,9 @@ def main():
     current_phase = 1
 
     for epoch in range(1, epochs_total + 1):
-
         if epoch == phase1_epochs + 1 and current_phase == 1:
             optimizer, scheduler = build_phase2_optim_sched(model)
             current_phase = 2
-            # for name, para in model.named_parameters():
-            #     if "mask_decoder" in name:
-            #         para.requires_grad_(True)
             print("==== Switched to Phase-2 optimizer/scheduler (epoch {}) ====".format(epoch))
             log_file.write("==== Switched to Phase-2 optimizer/scheduler (epoch {}) ====\n".format(epoch))
 
@@ -215,7 +251,9 @@ def main():
 
         time2 = time.time()
         log_line = (
-            f"epoch {epoch} (phase {current_phase}), train, lr={current_lr:.6f}, mean loss {losses.avg:.3f}, total time {time2 - time1:.2f}\n")
+            f"epoch {epoch} (phase {current_phase}), train, lr={current_lr:.6f}, "
+            f"mean loss {losses.avg:.3f}, total time {time2 - time1:.2f}\n"
+        )
         print(log_line.strip())
         log_file.write(log_line)
 
@@ -231,11 +269,24 @@ def main():
                     target = target.unsqueeze(1).cuda()
                     onehot = onehot.cuda()
 
-                logit = model(input)
-                if is_onehot:
-                    loss = criterion_bce(logit, onehot.float()) + criterion_iou(logit, onehot.float())
-                else:
-                    loss = criterion_bce(logit, target.float()) + criterion_iou(logit, target.float())
+                # logit = _extract_logits(model(input))
+                # if is_onehot:
+                #     loss = criterion_bce(logit, onehot.float()) + criterion_iou(logit, onehot.float())
+                # else:
+                #     #loss = criterion_bce(logit, target.float()) + criterion_iou(logit, target.float())
+                #     target_for_loss = build_target_for_loss(logit, target, onehot,is_onehot)
+                #     loss = criterion_bce(logit, target_for_loss) + criterion_iou(logit, target_for_loss)
+                model_inp_size = getattr(model, "inp_size", None)
+                if (
+                        isinstance(model_inp_size, int)
+                        and (input.size(2) != model_inp_size or input.size(3) != model_inp_size)
+                ):
+                    input = F.interpolate(input, size=model_inp_size, mode='bilinear', align_corners=False)
+                    target = F.interpolate(target.float(), size=model_inp_size, mode='nearest')
+                    onehot = F.interpolate(onehot.float(), size=model_inp_size, mode='nearest')
+                logit=build_logit_for_loss(_extract_logits(model(input)),is_onehot)
+                target_for_loss = build_target_for_loss(logit,target, onehot,is_onehot)
+                loss = criterion_bce(logit, target_for_loss)+criterion_iou(logit, target_for_loss)
                 val_losses.update(loss.item(), input.size(0))
 
         time2 = time.time()
@@ -247,8 +298,12 @@ def main():
             log_line = f"========  get student model iou (epoch {epoch})  ========:\n"
             print(log_line.strip())
             log_file.write(log_line)
-            iou_list = pred_train(testdataloader, model, val_img_list, pred_path, gt_folder, inp_size, is_onehot)
-            log_line = f"✅ Background IoU: {iou_list[0]:.4f}\n✅ Foreground IoU: {iou_list[1]:.4f}\n✅ Mean IoU (mIoU): {iou_list[2]:.4f}\n"
+            iou_list = pred(testdataloader, model, val_img_list, pred_path, gt_folder, inp_size, is_onehot)
+            log_line = (
+                f"✅ Background IoU: {iou_list[0]:.4f}\n"
+                f"✅ Foreground IoU: {iou_list[1]:.4f}\n"
+                f"✅ Mean IoU (mIoU): {iou_list[2]:.4f}\n"
+            )
             print(log_line.strip())
             log_file.write(log_line)
 
@@ -263,8 +318,12 @@ def main():
         print(log_line.strip())
         log_file.write(log_line)
         load_checkpoint(model, os.path.join(save_path, f"{model_name}_best.pth"), device, model_name)
-        iou_list = pred_train(testdataloader, model, val_img_list, pred_path, gt_folder, inp_size, is_onehot)
-        log_line = f"✅ Background IoU: {iou_list[0]:.4f}\n✅ Foreground IoU: {iou_list[1]:.4f}\n✅ Mean IoU (mIoU): {iou_list[2]:.4f}\n"
+        iou_list = pred(testdataloader, model, val_img_list, pred_path, gt_folder, inp_size, is_onehot)
+        log_line = (
+            f"✅ Background IoU: {iou_list[0]:.4f}\n"
+            f"✅ Foreground IoU: {iou_list[1]:.4f}\n"
+            f"✅ Mean IoU (mIoU): {iou_list[2]:.4f}\n"
+        )
         print(log_line.strip())
         log_file.write(log_line)
 

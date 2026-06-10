@@ -56,7 +56,7 @@ all_dataset:
   batch_size: 1
 
 eval_type: kvasir
-sam_checkpoint: ./save/sam_adapter_b_orange/student_model/sam_adapter_b_best_miou.pth
+sam_checkpoint: /home/hyw/wangwei/MobileSAM-Adapter/checkpoints/sam_vit_b_01ec64.pth
 data_norm:
   inp:
     sub:

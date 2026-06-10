@@ -103,6 +103,13 @@ ENV/
 env.bak/
 venv.bak/
 
+# Model weights and large files
+checkpoints/
+*.pt
+*.onnx
+*.zip
+*.rar
+
 # Spyder project settings
 .spyderproject
 .spyproject
@@ -115,4 +122,3 @@ venv.bak/
 
 # mypy
 .mypy_cache/
-checkpoints/*.pt
